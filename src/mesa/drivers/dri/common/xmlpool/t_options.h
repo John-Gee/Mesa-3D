@@ -362,3 +362,8 @@ DRI_CONF_OPT_END
 DRI_CONF_OPT_BEGIN(throttle_value, int, def) \
         DRI_CONF_DESC(en,gettext("Define the throttling value. -1 for no throttling, -2 for default (usually 2), 0 for glfinish behaviour")) \
 DRI_CONF_OPT_END
+
+#define DRI_CONF_NINE_THREADSUBMIT(def) \
+DRI_CONF_OPT_BEGIN_B(thread_submit, def) \
+        DRI_CONF_DESC(en,gettext("Use an additionnal thread to submit buffers.")) \
+DRI_CONF_OPT_END

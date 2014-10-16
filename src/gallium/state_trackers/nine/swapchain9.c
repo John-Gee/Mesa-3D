@@ -33,6 +33,8 @@
 #include "hud/hud_context.h"
 #include "state_tracker/drm_driver.h"
 
+#include "threadpool.h"
+
 #define DBG_CHANNEL DBG_SWAPCHAIN
 
 #define UNTESTED(n) DBG("UNTESTED point %d. Please tell if it worked\n", n)
@@ -69,6 +71,7 @@ NineSwapChain9_ctor( struct NineSwapChain9 *This,
         params.hDeviceWindow = hFocusWindow;
 
     This->rendering_done = FALSE;
+    This->pool = NULL;
     return NineSwapChain9_Resize(This, &params);
 }
 
@@ -216,6 +219,21 @@ NineSwapChain9_Resize( struct NineSwapChain9 *This,
     desc.MultiSampleQuality = 0;
     desc.Width = pParams->BackBufferWidth;
     desc.Height = pParams->BackBufferHeight;
+
+    if (This->pool) {
+        _mesa_threadpool_destroy(This->pool);
+        This->pool = NULL;
+    }
+    This->enable_threadpool = This->actx->thread_submit && (pParams->SwapEffect != D3DSWAPEFFECT_COPY);
+    if (This->enable_threadpool)
+        This->pool = _mesa_threadpool_create();
+    if (!This->pool)
+        This->enable_threadpool = FALSE;
+
+    This->tasks = REALLOC(This->tasks,
+                          oldBufferCount * sizeof(struct threadpool_task *),
+                          newBufferCount * sizeof(struct threadpool_task *));
+    memset(This->tasks, 0, newBufferCount * sizeof(struct threadpool_task *));
 
     for (i = 0; i < oldBufferCount; i++) {
         ID3DPresent_DestroyD3DWindowBuffer(This->present, This->present_handles[i]);
@@ -434,6 +452,9 @@ NineSwapChain9_dtor( struct NineSwapChain9 *This )
 
     DBG("This=%p\n", This);
 
+    if (This->pool)
+        _mesa_threadpool_destroy(This->pool);
+
     if (This->buffers) {
         for (i = 0; i < This->params.BackBufferCount; i++) {
             NineUnknown_Destroy(NineUnknown(This->buffers[i]));
@@ -530,6 +551,40 @@ handle_draw_cursor_and_hud( struct NineSwapChain9 *This, struct pipe_resource *r
         /* HUD doesn't clobber stipple */
         NineDevice9_RestoreNonCSOState(device, ~0x2);
     }
+}
+
+struct end_present_struct {
+    struct pipe_screen *screen;
+    struct pipe_fence_handle *fence_to_wait;
+    ID3DPresent *present;
+    D3DWindowBuffer *present_handle;
+    HWND hDestWindowOverride;
+};
+
+static void work_present(void *data)
+{
+    struct end_present_struct *work = data;
+    if (work->fence_to_wait) {
+        (void) work->screen->fence_finish(work->screen, work->fence_to_wait, PIPE_TIMEOUT_INFINITE);
+        work->screen->fence_reference(work->screen, &(work->fence_to_wait), NULL);
+    }
+    ID3DPresent_PresentBuffer(work->present, work->present_handle, work->hDestWindowOverride, NULL, NULL, NULL, 0);
+    free(work);
+}
+
+static void pend_present(struct NineSwapChain9 *This,
+                         HWND hDestWindowOverride)
+{
+    struct end_present_struct *work = calloc(1, sizeof(struct end_present_struct));
+
+    work->screen = This->screen;
+    work->fence_to_wait = swap_fences_pop_front(This);
+    work->present = This->present;
+    work->present_handle = This->present_handles[0];
+    work->hDestWindowOverride = hDestWindowOverride;
+    This->tasks[0] = _mesa_threadpool_queue_task(This->pool, work_present, work);
+
+    return;
 }
 
 static INLINE HRESULT
@@ -634,21 +689,26 @@ bypass_rendering:
             return D3DERR_WASSTILLDRAWING;
     }
 
-    fence = swap_fences_pop_front(This);
-    if (fence) {
-        (void) This->screen->fence_finish(This->screen, fence, PIPE_TIMEOUT_INFINITE);
-        This->screen->fence_reference(This->screen, &fence, NULL);
-    }
-
     if (This->present_buffers)
         resource = This->present_buffers[0];
     else
         resource = This->buffers[0]->base.resource;
     This->pipe->flush_resource(This->pipe, resource);
-    hr = ID3DPresent_PresentBuffer(This->present, This->present_handles[0], hDestWindowOverride, pSourceRect, pDestRect, pDirtyRegion, dwFlags);
 
-    if (FAILED(hr)) { UNTESTED(3);return hr; }
+    if (!This->enable_threadpool) {
+        This->tasks[0]=NULL;
+        fence = swap_fences_pop_front(This);
+        if (fence) {
+            (void) This->screen->fence_finish(This->screen, fence, PIPE_TIMEOUT_INFINITE);
+            This->screen->fence_reference(This->screen, &fence, NULL);
+        }
 
+        hr = ID3DPresent_PresentBuffer(This->present, This->present_handles[0], hDestWindowOverride, pSourceRect, pDestRect, pDirtyRegion, dwFlags);
+
+        if (FAILED(hr)) { UNTESTED(3);return hr; }
+    } else {
+        pend_present(This, hDestWindowOverride);
+    }
     This->rendering_done = FALSE;
 
     return D3D_OK;
@@ -664,8 +724,8 @@ NineSwapChain9_Present( struct NineSwapChain9 *This,
 {
     struct pipe_resource *res = NULL;
     D3DWindowBuffer *handle_temp;
+    struct threadpool_task *task_temp;
     int i;
-    BOOL released;
     HRESULT hr = present(This, pSourceRect, pDestRect,
                          hDestWindowOverride, pDirtyRegion, dwFlags);
 
@@ -699,6 +759,11 @@ NineSwapChain9_Present( struct NineSwapChain9 *This,
                 This->present_handles[i-1] = This->present_handles[i];
             }
             This->present_handles[This->params.BackBufferCount] = handle_temp;
+            task_temp = This->tasks[0];
+            for (i = 1; i <= This->params.BackBufferCount; i++) {
+                This->tasks[i-1] = This->tasks[i];
+            }
+            This->tasks[This->params.BackBufferCount] = task_temp;
             break;
 
         case D3DSWAPEFFECT_COPY:
@@ -714,28 +779,12 @@ NineSwapChain9_Present( struct NineSwapChain9 *This,
             /* XXX not implemented */
             break;
     }
-    /* Because d3d9 has a render ahead queue,
-     * we either copy right away the buffer on the screen,
-     * or we schedule flips with never more than 1 buffer
-     * per vblank. With standard X Present extension we should always
-     * have This->buffers[0] released here (it means the server has
-     * finished all work with it). However slightly different behaviour
-     * can occur in the future when Present will allow the compositor
-     * to manage what happens, or with XWayland.
-     * Then wait here This->buffers[0] is released.
-     * However in Copy mode we'll ignore if the buffer is released,
-     * since if the buffer is used for flip it might never be released.
-     * The Copy mode will have tearings, but that's expected
-     * Note: the Copy mode doesn't render to the buffer presented,
-     * it only copies to it. Thus we can't have glitches here. Only tearings.*/
-    if (This->params.SwapEffect != D3DSWAPEFFECT_COPY) {
-        ID3DPresent_IsBufferReleased(This->present, This->present_handles[0], &released);
-        while (!released) {
-            UNTESTED(6);
-            ID3DPresent_WaitOneBufferReleased(This->present);
-            ID3DPresent_IsBufferReleased(This->present, This->present_handles[0], &released);
-        }
-    }
+
+    if (This->tasks[0])
+        _mesa_threadpool_wait_for_task(This->pool, &(This->tasks[0]));
+
+    ID3DPresent_WaitBufferReleased(This->present, This->present_handles[0]);
+
     This->base.device->state.changed.group |= NINE_STATE_FB;
     nine_update_state(This->base.device, NINE_STATE_FB);
 

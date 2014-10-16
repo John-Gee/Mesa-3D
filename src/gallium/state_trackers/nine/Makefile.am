@@ -37,6 +37,7 @@ libninetracker_la_SOURCES = \
     swapchain9.c \
     swapchain9ex.c \
     texture9.c \
+    threadpool.c \
     vertexbuffer9.c \
     vertexdeclaration9.c \
     vertexshader9.c \

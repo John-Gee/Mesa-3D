@@ -56,9 +56,7 @@ typedef struct ID3DPresentVtbl
     /* After presenting a buffer to the window system, the buffer
      * may be used as is (no copy of the content) by the window system.
      * You must not use a non-released buffer, else the user may see undefined content. */
-    HRESULT (WINAPI *IsBufferReleased)(ID3DPresent *This, D3DWindowBuffer *buffer, BOOL *bReleased);
-    /* It is possible buffers are not released in order */
-    HRESULT (WINAPI *WaitOneBufferReleased)(ID3DPresent *This);
+    HRESULT (WINAPI *WaitBufferReleased)(ID3DPresent *This, D3DWindowBuffer *buffer);
     HRESULT (WINAPI *FrontBufferCopy)(ID3DPresent *This, D3DWindowBuffer *buffer);
     /* It is possible to do partial copy, but impossible to do resizing, which must
      * be done by the client after checking the front buffer size */
@@ -88,8 +86,7 @@ struct ID3DPresent
 #define ID3DPresent_SetPresentParameters(p,a) (p)->lpVtbl->SetPresentParameters(p,a)
 #define ID3DPresent_NewD3DWindowBufferFromDmaBuf(p,a,b,c,d,e,f,g) (p)->lpVtbl->NewD3DWindowBufferFromDmaBuf(p,a,b,c,d,e,f,g)
 #define ID3DPresent_DestroyD3DWindowBuffer(p,a) (p)->lpVtbl->DestroyD3DWindowBuffer(p,a)
-#define ID3DPresent_IsBufferReleased(p,a,b) (p)->lpVtbl->IsBufferReleased(p,a,b)
-#define ID3DPresent_WaitOneBufferReleased(p) (p)->lpVtbl->WaitOneBufferReleased(p)
+#define ID3DPresent_WaitBufferReleased(p,a) (p)->lpVtbl->WaitBufferReleased(p,a)
 #define ID3DPresent_FrontBufferCopy(p,a) (p)->lpVtbl->FrontBufferCopy(p,a)
 #define ID3DPresent_PresentBuffer(p,a,b,c,d,e,f) (p)->lpVtbl->PresentBuffer(p,a,b,c,d,e,f)
 #define ID3DPresent_GetRasterStatus(p,a) (p)->lpVtbl->GetRasterStatus(p,a)
